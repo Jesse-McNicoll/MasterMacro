@@ -232,18 +232,111 @@ PriceListDirectoryPath = "F:\Awesome Department\DTI Vendor Price Lists"
     Range("C1:D2").Select
     Range(Selection, Selection.End(xlDown)).Select
     ActiveWorkbook.Names.Add Name:="OldPriceRange", RefersToR1C1:= _
-        "=OldPriceTable[[#All],[VenPartNum]:[BaseUnitPrice]]"
+        "=OldPriceTable[[#All],[VenPartNum]:[NonStock]]"
     
-    'Apply the vlookup
-    CompareFile.Worksheets("PriceView").Range("H2").Value = Application.WorksheetFunction.VLookup(D2, OldPriceRange, 2, False)
-    CompareFile.Worksheets("PriceView").Range("ComparisonTable[OldPrice").Formula = "=VLOOKUP(D2,A2,1,FALSE)"
+    'Apply the vlookup for the old prices
+    CompareFile.Worksheets("PriceView").Select
+    Range("H2").Select
+    ActiveCell.FormulaR1C1 = "=VLOOKUP(RC[-4],OldPriceRange,2, FALSE)"
+    
     
     'Now fill out the price change columns and percent change columns using formulas.  This allows human comparison.
-    CompareFile.Worksheets("PriceView").Range("ComparisonTable[%Change]").Formula = "=G2-H2"
-        
+    CompareFile.Worksheets("PriceView").Range("ComparisonTable[$Change]").Formula = "=G2-H2"
+    CompareFile.Worksheets("PriceView").Range("ComparisonTable[%Change]").Formula = "=J2/G2"
     
+    'Now apply a vlookup for stock identification
+    Range("K2").Select
+    ActiveCell.FormulaR1C1 = "=VLOOKUP(RC[-7],OldPriceRange,9, FALSE)"
+    Range("ComparisonTable[Stock Item]").Copy
+    Range("ComparisonTable[Stock Item]").PasteSpecial xlPasteValues
+    'Modify the language from boolean to yes/no to make more readable
+    Worksheets("PriceView").Columns("K").Replace _
+        What:="False", Replacement:="Yes", _
+        SearchOrder:=xlByColumns, MatchCase:=False
+    Worksheets("PriceView").Columns("K").Replace _
+        What:="True", Replacement:="No", _
+        SearchOrder:=xlByColumns, MatchCase:=False
+    Worksheets("PriceView").Columns("K").Replace _
+        What:="0", Replacement:="No", _
+        SearchOrder:=xlByColumns, MatchCase:=False
+    
+'Subroutine 4: Who's your data
+'Now, fill the remaining data sheets of the price comparison workbook to allow the remaining columns to be entered
+'in the price comparison worksheet
+    
+    'Fill the quantity shipped sheet.
+    'First, refresh the recordset.
+    RS.Close
+    'Now, create the query for quantity shipped.
+    Dim QtyShipQuery As String
+    QtyShipQuery = "SELECT     dbo.v_InvoiceRegisterForTurns.VendName, dbo.v_InvoiceRegisterForTurns.PartNum, SUM(dbo.v_InvoiceRegisterForTurns.OurShipQty) AS QuantityShipped" _
+                   & " FROM         Epicor10.Erp.Vendor INNER JOIN" _
+                   & " dbo.v_InvoiceRegisterForTurns ON Epicor10.Erp.Vendor.Name = dbo.v_InvoiceRegisterForTurns.VendName" _
+                   & " WHERE     (dbo.v_InvoiceRegisterForTurns.InvoiceDate > DATEADD(yyyy, - 1, GETDATE())) AND (Epicor10.Erp.Vendor.VendorID = '" & VENDOR_ID & "')" _
+                   & " GROUP BY dbo.v_InvoiceRegisterForTurns.VendName, dbo.v_InvoiceRegisterForTurns.PartNum"
+    RS.Open QtyShipQuery
+    'May be possible to truncate this operation
+    'Copy the data to the excel worksheet to allow for reference.
+    CompareFile.Sheets("VendorFilteredQtyShipped").Select
+    ActiveSheet.Range("A2").CopyFromRecordset RS
         
-        
+    'Fill the price change report data sheet
+    'First, refresh the recordset
+    RS.Close
+    'Now, create the query for the price change report data
+    Dim PriceChangeQuery As String
+    PriceChangeQuery = "SELECT     db_ddladmin.v_PartNumsWithContracts.Company, db_ddladmin.v_PartNumsWithContracts.PartNum, db_ddladmin.v_PartNumsWithContracts.ListCode, " _
+                       & " db_ddladmin.v_PartNumsWithContracts.NumberOfListCodes, db_ddladmin.v_QuoteNumLineForOpenQuotesCONCd.QuoteNumLine, " _
+                       & " db_ddladmin.v_QuoteNumLineForOpenQuotesCONCd.NumberOfQuoteNumLines , Epicor10.Erp.Vendor.VendorID " _
+                       & " FROM         Epicor10.Erp.Vendor INNER JOIN" _
+                       & " Epicor10.Erp.PartPlant ON Epicor10.Erp.Vendor.VendorNum = Epicor10.Erp.PartPlant.VendorNum RIGHT OUTER JOIN " _
+                       & " db_ddladmin.v_PartNumsWithContracts ON Epicor10.Erp.PartPlant.PartNum = db_ddladmin.v_PartNumsWithContracts.PartNum RIGHT OUTER JOIN " _
+                       & " db_ddladmin.v_QuoteNumLineForOpenQuotesCONCd ON Epicor10.Erp.PartPlant.Company = db_ddladmin.v_QuoteNumLineForOpenQuotesCONCd.Company AND" _
+                       & " Epicor10.Erp.PartPlant.PartNum = db_ddladmin.v_QuoteNumLineForOpenQuotesCONCd.PartNum" _
+                       & " WHERE     (Epicor10.Erp.Vendor.VendorID = '" & VENDOR_ID & "') AND (Epicor10.Erp.PartPlant.Plant = 'DIST') "
+    'Set the cursor location to client side, allowing proper data querying.
+    RS.CursorLocation = adUseClient
+    'Conduct the query to load it into the recordset
+    RS.Open PriceChangeQuery
+    'Now it can be loaded into its appropriate sheet for reference
+    CompareFile.Sheets("VendorFilteredPriceChangeReport").Select
+    ActiveSheet.Range("A2").CopyFromRecordset RS
+    
+    'Fill the recent contracts tab
+    'First, refresh the recordset
+    RS.Close
+    'Now, create the query for the most recent contract expirations
+    Dim ContractExpirationQuery
+    ContractExpirationQuery = "select PriceLstParts.Company, Vendor.VendorID, VendPart.VenPartNum, PriceLstParts.ListCode, " _
+                              & " MAX(CASE WHEN PriceLst.EndDate IS NOT NULL THEN PriceLst.EndDate ELSE DATEADD(year, 1, PriceLst.StartDate) END) AS ExpirationDate" _
+                              & " from Epicor10.Erp.VendPart As VendPart LEFT JOIN Epicor10.Erp.PriceLstParts As PriceLstParts" _
+                              & " ON VendPart.VenPartNum = PriceLstParts.PartNum LEFT JOIN Epicor10.Erp.Vendor as Vendor on Vendor.VendorNum = VendPart.VendorNum" _
+                              & " LEFT JOIN Epicor10.Erp.PriceLst AS PriceLst ON PriceLst.ListCode = PriceLstParts.ListCode" _
+                              & " where Vendor.VendorID = 'BRADYWOR' AND PriceLstParts.ListCode IS NOT NULL" _
+                              & " GROUP BY VendPart.VenPartNum, PriceLstParts.Company, Vendor.VendorID, PriceLstParts.ListCode"
+    'Conduct the query to load it into the recordset
+    RS.Open ContractExpirationQuery
+    'Now it can be loaded into its appropriate sheet for reference
+    CompareFile.Sheets("RecentContracts").Select
+    ActiveSheet.Range("A2").CopyFromRecordset RS
+    
+                                         
+'Subroutine 5: Numbers never lie
+'
+'Perform vertical lookups on the recently gathered data to fill out the price comparison sheet.
+'
+
+'Create the named range
+    
+    CompareFile.Worksheets("VendorFilteredQtyShipped").Range("B2:C2").Select
+    Range(Selection, Selection.End(xlDown)).Select
+    ActiveWorkbook.Names.Add Name:="QtyRange", RefersToR1C1:= _
+        "=QtyShipTable[[#All],[PartNum]:[QuantityShipped]]"
+    
+    'Apply the vlookup for the 12MonthShipQty
+    CompareFile.Worksheets("PriceView").Range("L2").Select
+    ActiveCell.FormulaR1C1 = "=VLOOKUP(RC[-9],QtyRange,2, FALSE)"
+
         
         
         
